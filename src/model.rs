@@ -33,6 +33,17 @@ pub struct ContainerInfo {
     pub command: String,
     pub ports: Vec<String>,
     pub project: Option<String>,
+    /// Set when the container was created by `docker compose`; needed to rebuild it.
+    pub compose: Option<Compose>,
+}
+
+#[derive(Clone, Debug)]
+pub struct Compose {
+    pub project: String,
+    pub service: String,
+    /// Project working directory (where `.env` lives).
+    pub dir: String,
+    pub files: Vec<String>,
 }
 
 impl ContainerInfo {
@@ -168,6 +179,7 @@ mod tests {
             command: String::new(),
             ports: vec![],
             project: project.map(Into::into),
+            compose: None,
         }
     }
 

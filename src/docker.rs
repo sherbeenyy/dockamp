@@ -18,7 +18,7 @@ use futures_util::StreamExt;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinHandle;
 
-use crate::model::{ContainerInfo, State};
+use crate::model::{Compose, ContainerInfo, State};
 
 #[derive(Debug, Clone, Copy)]
 pub enum Action {
@@ -53,6 +53,8 @@ impl Action {
 pub enum Command {
     Select(Option<String>),
     Act(String, Action),
+    /// Rebuild/recreate a compose service: (container name, compose info).
+    Rebuild(String, Compose),
 }
 
 #[derive(Debug, Clone)]
@@ -68,6 +70,8 @@ pub enum Update {
     Snapshot(Vec<ContainerInfo>),
     Stats(StatsSample),
     ActionDone(String),
+    /// Latest output line of a running rebuild.
+    Progress(String),
     Error(String),
 }
 
@@ -161,6 +165,9 @@ async fn run(mut cmd_rx: UnboundedReceiver<Command>, out: Out) {
                             selected = id;
                             restart_stats(&docker, &out, &selected, &mut stats_task);
                         }
+                    }
+                    Some(Command::Rebuild(name, compose)) => {
+                        tokio::spawn(rebuild(name, compose, out.clone()));
                     }
                     Some(Command::Act(id, action)) => {
                         let (docker, out) = (docker.clone(), out.clone());
@@ -285,6 +292,17 @@ fn convert(r: ContainerInspectResponse) -> Option<ContainerInfo> {
         command,
         ports,
         project: labels.get("com.docker.compose.project").cloned(),
+        compose: (|| {
+            Some(Compose {
+                project: labels.get("com.docker.compose.project")?.clone(),
+                service: labels.get("com.docker.compose.service")?.clone(),
+                dir: labels.get("com.docker.compose.project.working_dir")?.clone(),
+                files: labels
+                    .get("com.docker.compose.project.config_files")
+                    .map(|f| f.split(',').filter(|s| !s.is_empty()).map(String::from).collect())
+                    .unwrap_or_default(),
+            })
+        })(),
     })
 }
 
@@ -330,3 +348,83 @@ fn sample(id: &str, s: &Stats) -> StatsSample {
     }
 }
 
+/// Where rebuild logs go: `$XDG_CACHE_HOME/dockamp` or `~/.cache/dockamp`.
+pub fn log_dir() -> std::path::PathBuf {
+    std::env::var_os("XDG_CACHE_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::Path::new(&h).join(".cache")))
+        .unwrap_or_else(std::env::temp_dir)
+        .join("dockamp")
+}
+
+/// `docker compose up -d --build --force-recreate --no-deps <service>`: builds the image if the
+/// service has a `build:` section, then recreates the container (re-reading compose + .env).
+/// Volumes are untouched, so data survives. Output streams to the marquee and a log file.
+async fn rebuild(name: String, c: Compose, out: Out) {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let dir = log_dir();
+    let _ = tokio::fs::create_dir_all(&dir).await;
+    let log_path = dir.join(format!("{name}.log"));
+    let mut log = tokio::fs::File::create(&log_path).await.ok();
+
+    let mut cmd = tokio::process::Command::new("docker");
+    cmd.arg("compose").arg("--progress").arg("plain");
+    cmd.arg("-p").arg(&c.project).arg("--project-directory").arg(&c.dir);
+    for f in &c.files {
+        cmd.arg("-f").arg(f);
+    }
+    cmd.args(["up", "-d", "--build", "--force-recreate", "--no-deps"]).arg(&c.service);
+    cmd.current_dir(&c.dir)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+
+    let header = format!("$ {:?}\n", cmd.as_std());
+    if let Some(l) = log.as_mut() {
+        let _ = l.write_all(header.as_bytes()).await;
+    }
+
+    let mut child = match cmd.spawn() {
+        Ok(ch) => ch,
+        Err(e) => {
+            out.send(Update::ActionDone(format!("REBUILD FAILED: {e}")));
+            return;
+        }
+    };
+    // Merge stdout + stderr line by line (compose writes progress to stderr).
+    let (tx, mut rx) = unbounded_channel::<String>();
+    for pipe in [
+        child.stdout.take().map(|p| Box::new(p) as Box<dyn tokio::io::AsyncRead + Unpin + Send>),
+        child.stderr.take().map(|p| Box::new(p) as Box<dyn tokio::io::AsyncRead + Unpin + Send>),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let tx = tx.clone();
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(pipe).lines();
+            while let Ok(Some(l)) = lines.next_line().await {
+                let _ = tx.send(l);
+            }
+        });
+    }
+    drop(tx);
+    while let Some(line) = rx.recv().await {
+        if let Some(l) = log.as_mut() {
+            let _ = l.write_all(line.as_bytes()).await;
+            let _ = l.write_all(b"\n").await;
+        }
+        let line = line.trim();
+        if !line.is_empty() {
+            out.send(Update::Progress(format!("BUILDING {}: {}", c.service, line)));
+        }
+    }
+    let ok = child.wait().await.map(|s| s.success()).unwrap_or(false);
+    out.send(Update::ActionDone(if ok {
+        format!("REBUILT {}", c.service)
+    } else {
+        format!("REBUILD FAILED - SEE {}", log_path.display())
+    }));
+}

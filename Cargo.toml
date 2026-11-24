@@ -7,7 +7,7 @@ description = "A retro skinned-player style Docker container manager"
 [dependencies]
 eframe = { version = "0.31", default-features = false, features = ["glow", "wayland", "x11"] }
 bollard = "0.18"
-tokio = { version = "1", features = ["rt", "macros", "sync", "time"] }
+tokio = { version = "1", features = ["rt", "macros", "sync", "time", "process", "io-util", "fs"] }
 futures-util = "0.3"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 

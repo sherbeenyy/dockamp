@@ -28,6 +28,10 @@ pub struct App {
     pub containers: Vec<ContainerInfo>,
     pub rows: Vec<Row>,
     pub selected: Option<String>,
+    /// Name of the selection, so it survives the container being recreated with a new ID.
+    selected_name: Option<String>,
+    /// Container name currently being rebuilt (one at a time).
+    building: Option<String>,
     pub stats: Option<StatsSample>,
     pub cpu_hist: VecDeque<f32>,
     /// Marquee override: (message, since, still in progress)
@@ -53,6 +57,8 @@ impl App {
             containers: Vec::new(),
             rows: Vec::new(),
             selected: None,
+            selected_name: None,
+            building: None,
             stats: None,
             cpu_hist: VecDeque::with_capacity(SPECTRUM_BARS),
             flash: None,
@@ -84,6 +90,10 @@ impl App {
 
     fn set_selected(&mut self, id: Option<String>) {
         if id != self.selected {
+            self.selected_name = id
+                .as_deref()
+                .and_then(|id| self.containers.iter().find(|c| c.id == id))
+                .map(|c| c.name.clone());
             self.selected = id.clone();
             self.stats = None;
             self.cpu_hist.clear();
@@ -125,6 +135,23 @@ impl App {
         }
     }
 
+    /// Shift+R: recreate (and build, if it has a Dockerfile) the selected compose service.
+    pub fn rebuild(&mut self) {
+        let Some(c) = self.selected_info() else { return };
+        let msg = if let Some(b) = &self.building {
+            format!("ALREADY REBUILDING {}", b.to_uppercase())
+        } else if let Some(compose) = c.compose.clone() {
+            let name = c.name.clone();
+            self.flash = Some((format!("BUILDING {}...", compose.service), Instant::now(), true));
+            self.building = Some(name.clone());
+            let _ = self.cmd.send(Command::Rebuild(name, compose));
+            return;
+        } else {
+            "NOT A COMPOSE CONTAINER - CANNOT REBUILD".into()
+        };
+        self.flash = Some((msg, Instant::now(), false));
+    }
+
     pub fn cycle_scale(&mut self, ctx: &egui::Context) {
         self.scale = self.scale % 3 + 1;
         ctx.send_viewport_cmd(ViewportCommand::InnerSize(window_size(self.scale)));
@@ -152,8 +179,12 @@ impl App {
                     self.rows = model::arrange(&mut v);
                     self.containers = v;
                     if self.selected_index().is_none() {
-                        let first = self.containers.first().map(|c| c.id.clone());
-                        self.set_selected(first);
+                        // Recreated (new ID, same name)? Keep it selected; else fall back to the first.
+                        let same_name = self.selected_name.as_deref().and_then(|n| {
+                            self.containers.iter().find(|c| c.name == n).map(|c| c.id.clone())
+                        });
+                        let next = same_name.or_else(|| self.containers.first().map(|c| c.id.clone()));
+                        self.set_selected(next);
                     }
                 }
                 Update::Stats(s) => {
@@ -165,7 +196,13 @@ impl App {
                         self.stats = Some(s);
                     }
                 }
-                Update::ActionDone(msg) => self.flash = Some((msg, Instant::now(), false)),
+                Update::ActionDone(msg) => {
+                    if msg.starts_with("REBUIL") {
+                        self.building = None;
+                    }
+                    self.flash = Some((msg, Instant::now(), false));
+                }
+                Update::Progress(line) => self.flash = Some((line, Instant::now(), true)),
                 Update::Error(e) => self.error = Some(e),
             }
         }
@@ -195,7 +232,11 @@ impl App {
             self.transport(Transport::Stop);
         }
         if pressed(Key::R) {
-            self.transport(Transport::Restart);
+            if ctx.input(|i| i.modifiers.shift) {
+                self.rebuild();
+            } else {
+                self.transport(Transport::Restart);
+            }
         }
         if pressed(Key::D) {
             self.cycle_scale(ctx);
