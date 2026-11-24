@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=DockAmp
+Comment=Retro skinned-player Docker container manager
+Exec=dockamp
+Icon=utilities-system-monitor
+Terminal=false
+Categories=System;Monitor;
+StartupWMClass=dockamp
