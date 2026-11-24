@@ -57,7 +57,8 @@ pub fn draw(app: &mut App, ui: &Ui, px: &Px) {
     lcd::draw(px, 100 - lcd::width(&time), 26, &time, lit);
 
     // CPU history as spectrum bars, newest on the right.
-    let n = app.cpu_hist.len();
+    // Stale history from before a stop is hidden: no CPU when not running.
+    let n = if sel.as_ref().is_some_and(|c| c.state.is_up()) { app.cpu_hist.len() } else { 0 };
     for i in 0..SPECTRUM_BARS {
         let x = 22 + i as i32 * 4;
         let v = if i + n >= SPECTRUM_BARS { app.cpu_hist[i + n - SPECTRUM_BARS] } else { 0.0 };

@@ -29,6 +29,7 @@ pub fn title_drag(ui: &Ui, px: &Px, id: &str) {
 }
 
 /// A raised chrome button with a bitmap icon; sunken while held. Returns clicked.
+#[allow(clippy::too_many_arguments)]
 pub fn button(ui: &Ui, px: &Px, id: &str, x: i32, y: i32, w: i32, h: i32, icon: &[&str]) -> bool {
     let r = hit(ui, px, id, x, y, w, h);
     let down = r.is_pointer_button_down_on();
