@@ -145,6 +145,9 @@ pub fn draw(app: &mut App, ui: &Ui, px: &Px) {
     if button(ui, px, "restart", 135, y, 23, 18, icon::RESTART) {
         app.transport(Transport::Restart);
     }
+    if button(ui, px, "remove", 162, y, 23, 18, icon::EJECT) {
+        app.remove();
+    }
 
     let up_n = app.containers.iter().filter(|c| c.state.is_up()).count();
     let summary = format!("{}/{} UP", up_n, app.containers.len());

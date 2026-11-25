@@ -1,5 +1,7 @@
 //! Plain container data + sorting/grouping/formatting. No Docker or UI types here.
 
+use std::time::{Duration, Instant};
+
 use chrono::{DateTime, Utc};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,6 +51,37 @@ pub struct Compose {
 impl ContainerInfo {
     pub fn short_id(&self) -> &str {
         &self.id[..self.id.len().min(12)]
+    }
+}
+
+/// Two-press confirmation for a destructive action on one container.
+#[derive(Debug, Default)]
+pub struct Confirm(Option<(String, Instant)>);
+
+impl Confirm {
+    /// A second press sooner than this is an accidental double-click.
+    const MIN: Duration = Duration::from_millis(400);
+    const WINDOW: Duration = Duration::from_secs(4);
+
+    /// Returns true when this press confirms an earlier one for the same container.
+    pub fn press(&mut self, id: &str, now: Instant) -> bool {
+        if !self.pending(id, now) {
+            self.0 = Some((id.to_string(), now));
+            return false;
+        }
+        let confirmed = self.0.as_ref().is_some_and(|(_, t)| now.duration_since(*t) >= Self::MIN);
+        if confirmed {
+            self.0 = None;
+        }
+        confirmed
+    }
+
+    pub fn pending(&self, id: &str, now: Instant) -> bool {
+        self.0.as_ref().is_some_and(|(i, t)| i == id && now.duration_since(*t) < Self::WINDOW)
+    }
+
+    pub fn cancel(&mut self) {
+        self.0 = None;
     }
 }
 
@@ -219,6 +252,21 @@ mod tests {
                 Row::Item(3),
             ]
         );
+    }
+
+    #[test]
+    fn confirm_needs_two_deliberate_presses() {
+        let t = Instant::now();
+        let ms = |n| t + Duration::from_millis(n);
+        let mut k = Confirm::default();
+        assert!(!k.press("a", t));
+        assert!(!k.press("a", ms(100)), "double-click must not confirm");
+        assert!(k.press("a", ms(1000)));
+        assert!(!k.press("a", ms(1100)), "confirming resets");
+        assert!(!k.press("b", ms(2000)), "another container starts over");
+        assert!(!k.press("b", ms(7000)), "expired");
+        k.cancel();
+        assert!(!k.press("b", ms(8000)), "cancelled");
     }
 
     #[test]

@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 use eframe::egui::{self, Key, Vec2, ViewportCommand};
 use tokio::sync::mpsc::UnboundedSender;
 
-use docker::{Command, StatsSample, Update};
-use model::{ContainerInfo, Row, State};
+use docker::{Action, Command, StatsSample, Update};
+use model::{Confirm, ContainerInfo, Row, State};
 use skin::{Canvas, Px};
 use ui::player::{Transport, SPECTRUM_BARS};
 
@@ -36,6 +36,8 @@ pub struct App {
     pub cpu_hist: VecDeque<f32>,
     /// Marquee override: (message, since, still in progress)
     flash: Option<(String, Instant, bool)>,
+    /// Container waiting for the second remove press.
+    removing: Confirm,
     pub error: Option<String>,
     pub scale: u8,
     pub scroll: usize,
@@ -62,6 +64,7 @@ impl App {
             stats: None,
             cpu_hist: VecDeque::with_capacity(SPECTRUM_BARS),
             flash: None,
+            removing: Confirm::default(),
             error: None,
             scale: DEFAULT_SCALE,
             scroll: 0,
@@ -95,6 +98,7 @@ impl App {
                 .and_then(|id| self.containers.iter().find(|c| c.id == id))
                 .map(|c| c.name.clone());
             self.selected = id.clone();
+            self.removing.cancel();
             self.stats = None;
             self.cpu_hist.clear();
             self.marquee_t0 = Instant::now();
@@ -152,6 +156,25 @@ impl App {
         self.flash = Some((msg, Instant::now(), false));
     }
 
+    /// Del / eject: the first press asks, the second one force-removes the container.
+    pub fn remove(&mut self) {
+        let Some(c) = self.selected_info() else { return };
+        let (id, name) = (c.id.clone(), c.name.clone());
+        if self.building.as_deref() == Some(name.as_str()) {
+            self.flash = Some(("REBUILDING - CANNOT REMOVE".into(), Instant::now(), false));
+        } else if self.removing.press(&id, Instant::now()) {
+            let a = Action::Remove;
+            self.flash = Some((a.progress().into(), Instant::now(), true));
+            let _ = self.cmd.send(Command::Act(id, a));
+        }
+        self.marquee_t0 = Instant::now();
+    }
+
+    /// True while the selected container is waiting for the second remove press.
+    pub fn remove_pending(&self) -> bool {
+        self.selected.as_deref().is_some_and(|id| self.removing.pending(id, Instant::now()))
+    }
+
     pub fn cycle_scale(&mut self, ctx: &egui::Context) {
         self.scale = self.scale % 3 + 1;
         ctx.send_viewport_cmd(ViewportCommand::InnerSize(window_size(self.scale)));
@@ -160,6 +183,10 @@ impl App {
     pub fn marquee_text(&self) -> String {
         if let Some(e) = &self.error {
             return e.clone();
+        }
+        if self.remove_pending() {
+            let name = self.selected_info().map_or("", |c| c.name.as_str());
+            return format!("DEL AGAIN TO REMOVE {name}").to_uppercase();
         }
         if let Some((m, _, _)) = &self.flash {
             return m.clone();
@@ -176,14 +203,18 @@ impl App {
             match u {
                 Update::Snapshot(mut v) => {
                     self.error = None;
+                    let old_index = self.selected_index();
                     self.rows = model::arrange(&mut v);
                     self.containers = v;
                     if self.selected_index().is_none() {
-                        // Recreated (new ID, same name)? Keep it selected; else fall back to the first.
+                        // Recreated (new ID, same name)? Keep it selected; else take its neighbour.
                         let same_name = self.selected_name.as_deref().and_then(|n| {
                             self.containers.iter().find(|c| c.name == n).map(|c| c.id.clone())
                         });
-                        let next = same_name.or_else(|| self.containers.first().map(|c| c.id.clone()));
+                        let next = same_name.or_else(|| {
+                            let i = old_index.unwrap_or(0).min(self.containers.len().checked_sub(1)?);
+                            Some(self.containers[i].id.clone())
+                        });
                         self.set_selected(next);
                     }
                 }
@@ -238,6 +269,16 @@ impl App {
                 self.transport(Transport::Restart);
             }
         }
+        // Auto-repeat must not count as the confirming press.
+        let del = |e: &egui::Event| {
+            matches!(e, egui::Event::Key { key: Key::Delete, pressed: true, repeat: false, .. })
+        };
+        if ctx.input(|i| i.events.iter().any(del)) {
+            self.remove();
+        }
+        if ctx.input(|i| i.key_pressed(Key::Escape)) {
+            self.removing.cancel();
+        }
         if pressed(Key::D) {
             self.cycle_scale(ctx);
         }
@@ -246,6 +287,7 @@ impl App {
     /// Repaint cadence: fast only while something animates, else once a second.
     fn next_tick(&self) -> Duration {
         let animating = self.flash.is_some()
+            || self.remove_pending()
             || self.marquee_text().chars().count() > 25
             || self.selected_info().is_some_and(|c| c.state == State::Paused);
         if animating {

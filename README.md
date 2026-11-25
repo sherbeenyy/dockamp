@@ -31,6 +31,8 @@ event-driven, and idles at roughly 1% CPU and ~30 MB of its own memory.
 - **Inspector:** ID, image, command, ports, health, restart count, exit code and created time.
 - **Transport controls:** start, pause/unpause, stop and restart from the player buttons or the
   keyboard.
+- **Remove containers:** eject a container for good with the ⏏ button or `Delete`, with a second
+  press to confirm (see [Removing](#removing-delete)).
 - **One-key rebuild:** `Shift+R` rebuilds or recreates a Compose service (see
   [Rebuilding](#rebuilding-shiftr)).
 - **Event-driven:** it listens to Docker's event stream and never polls. Stats are streamed only
@@ -52,6 +54,7 @@ event-driven, and idles at roughly 1% CPU and ~30 MB of its own memory.
 | ■              | `V`        | Stop                                              |
 | ⏭              | `B` / `↓`  | Next container                                    |
 | ⟳              | `R`        | Restart                                           |
+| ⏏              | `Delete`   | Remove the container (press twice)                |
 |                | `Shift+R`  | Rebuild / recreate the Compose service            |
 | `1` `2` `3`    | `D`        | Cycle window scale 1× / 2× / 3×                   |
 | `_` / `X`      |            | Minimize / close                                  |
@@ -59,8 +62,19 @@ event-driven, and idles at roughly 1% CPU and ~30 MB of its own memory.
 In the playlist, click a row to select it and double-click to start it. The mouse wheel scrolls.
 Drag any title bar to move the window.
 
-Actions apply immediately with no confirmation dialogs. Their progress shows in the marquee
-(`STOPPING...` → `STOPPED`). DockAmp never deletes containers, images or volumes.
+Actions apply immediately with no confirmation dialogs, except removing a container, which takes
+a second press. Their progress shows in the marquee (`STOPPING...` → `STOPPED`). DockAmp never
+deletes images or volumes.
+
+## Removing (`Delete`)
+
+Press `Delete` or the ⏏ button once: the selected row turns red and the marquee asks you to
+confirm. Press again within 4 seconds to remove the container. `Esc`, selecting another container
+or just waiting cancels.
+
+This is the same as `docker rm -f`: running containers are killed first, and anything written
+inside the container outside a volume is lost. **Images and volumes are kept.** A container that
+is being rebuilt can't be removed.
 
 ## Rebuilding (`Shift+R`)
 

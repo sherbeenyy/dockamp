@@ -7,7 +7,7 @@ use std::sync::mpsc::Sender;
 use std::time::Duration;
 
 use bollard::container::{
-    InspectContainerOptions, ListContainersOptions, RestartContainerOptions,
+    InspectContainerOptions, ListContainersOptions, RemoveContainerOptions, RestartContainerOptions,
     StartContainerOptions, Stats, StatsOptions, StopContainerOptions,
 };
 use bollard::models::{ContainerInspectResponse, ContainerStateStatusEnum};
@@ -27,6 +27,8 @@ pub enum Action {
     Pause,
     Unpause,
     Restart,
+    /// Force-remove the container. Its image and volumes are kept.
+    Remove,
 }
 
 impl Action {
@@ -37,6 +39,7 @@ impl Action {
             Action::Pause => "PAUSING...",
             Action::Unpause => "RESUMING...",
             Action::Restart => "RESTARTING...",
+            Action::Remove => "REMOVING...",
         }
     }
     fn done(self) -> &'static str {
@@ -46,6 +49,7 @@ impl Action {
             Action::Pause => "PAUSED",
             Action::Unpause => "RESUMED",
             Action::Restart => "RESTARTED",
+            Action::Remove => "REMOVED",
         }
     }
 }
@@ -178,6 +182,10 @@ async fn run(mut cmd_rx: UnboundedReceiver<Command>, out: Out) {
                                 Action::Pause => docker.pause_container(&id).await,
                                 Action::Unpause => docker.unpause_container(&id).await,
                                 Action::Restart => docker.restart_container(&id, None::<RestartContainerOptions>).await,
+                                Action::Remove => {
+                                    let opts = RemoveContainerOptions { force: true, ..Default::default() };
+                                    docker.remove_container(&id, Some(opts)).await
+                                }
                             };
                             let msg = match res {
                                 Ok(()) => action.done().to_string(),

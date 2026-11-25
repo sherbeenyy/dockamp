@@ -60,7 +60,7 @@ pub fn draw(app: &mut App, ui: &Ui, px: &Px) {
                 let c = &app.containers[*i];
                 let selected = app.selected.as_deref() == Some(c.id.as_str());
                 if selected {
-                    px.fill(WELL_X, y, WELL_W, ROW_H, pal::SELECT_BG);
+                    px.fill(WELL_X, y, WELL_W, ROW_H, if app.remove_pending() { pal::REMOVE_BG } else { pal::SELECT_BG });
                 }
                 let dur = match c.state {
                     s if s.is_up() => model::track_time(c.started_at.map_or(0, |t| (now - t).num_seconds())),

@@ -29,6 +29,7 @@ pub mod pal {
     pub const YELLOW: Color32 = c(0xe8, 0xe0, 0x20);
     pub const RED: Color32 = c(0xff, 0x30, 0x20);
     pub const SELECT_BG: Color32 = c(0x00, 0x00, 0xc6);
+    pub const REMOVE_BG: Color32 = c(0xa0, 0x10, 0x10);
     pub const WHITE: Color32 = c(0xff, 0xff, 0xff);
     pub const HEADER: Color32 = c(0xa8, 0xb4, 0xff);
 }
@@ -139,6 +140,7 @@ pub mod icon {
     pub const STOP: &[&str] = &["######", "######", "######", "######", "######", "######"];
     pub const NEXT: &[&str] = &["#...##", "##..##", "###.##", "######", "###.##", "##..##", "#...##"];
     pub const RESTART: &[&str] = &[".####.#", "#....##", "#...###", "#......", "#.....#", ".#...#.", "..###.."];
+    pub const EJECT: &[&str] = &["...#...", "..###..", ".#####.", "#######", ".......", "#######", "#######"];
     pub const STATE_PLAY: &[&str] = &["#....", "##...", "###..", "####.", "###..", "##...", "#...."];
     pub const STATE_PAUSE: &[&str] = &["##.##", "##.##", "##.##", "##.##", "##.##", "##.##", "##.##"];
     pub const STATE_STOP: &[&str] = &[".....", "#####", "#####", "#####", "#####", "#####", "....."];
