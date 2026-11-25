@@ -15,10 +15,12 @@ use bollard::system::EventsOptions;
 use bollard::Docker;
 use chrono::{DateTime, Datelike, Utc};
 use futures_util::StreamExt;
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
-use tokio::task::JoinHandle;
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender, WeakUnboundedSender};
+use tokio::task::{JoinHandle, JoinSet};
 
+use crate::console::{LogBuf, Shared, Term};
 use crate::model::{Compose, ContainerInfo, State};
+use crate::session;
 
 #[derive(Debug, Clone, Copy)]
 pub enum Action {
@@ -57,6 +59,15 @@ impl Action {
 pub enum Command {
     Select(Option<String>),
     Act(String, Action),
+    /// Follow this container's logs into the shared buffer (None stops).
+    Logs(Option<String>, Shared<LogBuf>),
+    /// Open a shell. It is hung up when every sender for `input` is gone.
+    Shell {
+        id: String,
+        term: Shared<Term>,
+        input: UnboundedReceiver<Vec<u8>>,
+        reply: WeakUnboundedSender<Vec<u8>>,
+    },
     /// Rebuild/recreate a compose service: (container name, compose info).
     Rebuild(String, Compose),
 }
@@ -80,11 +91,13 @@ pub enum Update {
 }
 
 /// Spawns the worker thread. `notify` is called after every update so the UI repaints.
+/// The returned receiver disconnects once the worker has cleaned up after the UI closed.
 pub fn spawn(
     tx: Sender<Update>,
     notify: impl Fn() + Send + Sync + 'static,
-) -> UnboundedSender<Command> {
+) -> (UnboundedSender<Command>, std::sync::mpsc::Receiver<()>) {
     let (cmd_tx, cmd_rx) = unbounded_channel();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
     std::thread::Builder::new()
         .name("docker".into())
         .spawn(move || {
@@ -94,9 +107,10 @@ pub fn spawn(
                 .expect("tokio runtime");
             let out = Out { tx, notify: std::sync::Arc::new(notify) };
             rt.block_on(run(cmd_rx, out));
+            drop::<std::sync::mpsc::Sender<()>>(done_tx);
         })
         .expect("spawn docker thread");
-    cmd_tx
+    (cmd_tx, done_rx)
 }
 
 #[derive(Clone)]
@@ -115,6 +129,9 @@ impl Out {
 async fn run(mut cmd_rx: UnboundedReceiver<Command>, out: Out) {
     let mut selected: Option<String> = None;
     let mut stats_task: Option<JoinHandle<()>> = None;
+    let mut logs: Option<(String, Shared<LogBuf>)> = None;
+    let mut logs_task: Option<JoinHandle<()>> = None;
+    let mut shells = JoinSet::new();
 
     loop {
         let docker = match Docker::connect_with_defaults() {
@@ -134,6 +151,7 @@ async fn run(mut cmd_rx: UnboundedReceiver<Command>, out: Out) {
         }
         out.send(Update::Snapshot(map.values().cloned().collect()));
         restart_stats(&docker, &out, &selected, &mut stats_task);
+        restart_logs(&docker, &out, &logs, &mut logs_task);
 
         let mut filters = HashMap::new();
         filters.insert("type".to_string(), vec!["container".to_string()]);
@@ -151,6 +169,10 @@ async fn run(mut cmd_rx: UnboundedReceiver<Command>, out: Out) {
                         if action.starts_with("exec_") { continue; }
                         let Some(id) = ev.actor.and_then(|a| a.id) else { continue };
                         refresh_one(&docker, &mut map, &id).await;
+                        // The log stream ends with the container; pick it up again.
+                        if action == "start" && logs.as_ref().is_some_and(|(l, _)| *l == id) {
+                            restart_logs(&docker, &out, &logs, &mut logs_task);
+                        }
                         out.send(Update::Snapshot(map.values().cloned().collect()));
                         if selected.as_deref() == Some(id.as_str()) {
                             restart_stats(&docker, &out, &selected, &mut stats_task);
@@ -163,7 +185,21 @@ async fn run(mut cmd_rx: UnboundedReceiver<Command>, out: Out) {
                     }
                 },
                 cmd = cmd_rx.recv() => match cmd {
-                    None => return, // UI closed
+                    // UI closed: its shells are hanging up, give them a moment.
+                    None => {
+                        let all = async { while shells.join_next().await.is_some() {} };
+                        let _ = tokio::time::timeout(Duration::from_secs(2), all).await;
+                        return;
+                    }
+                    Some(Command::Logs(id, buf)) => {
+                        logs = id.map(|id| (id, buf));
+                        restart_logs(&docker, &out, &logs, &mut logs_task);
+                    }
+                    Some(Command::Shell { id, term, input, reply }) => {
+                        while shells.try_join_next().is_some() {}
+                        let notify = out.notify.clone();
+                        shells.spawn(session::shell(docker.clone(), id, term, input, reply, move || notify()));
+                    }
                     Some(Command::Select(id)) => {
                         if id != selected {
                             selected = id;
@@ -200,7 +236,7 @@ async fn run(mut cmd_rx: UnboundedReceiver<Command>, out: Out) {
     }
 }
 
-fn short_err(e: &bollard::errors::Error) -> String {
+pub fn short_err(e: &bollard::errors::Error) -> String {
     match e {
         bollard::errors::Error::DockerResponseServerError { message, .. } => message.clone(),
         other => other.to_string(),
@@ -331,6 +367,20 @@ fn restart_stats(
             out.send(Update::Stats(sample(&id, &st)));
         }
     }));
+}
+
+fn restart_logs(
+    docker: &Docker,
+    out: &Out,
+    logs: &Option<(String, Shared<LogBuf>)>,
+    task: &mut Option<JoinHandle<()>>,
+) {
+    if let Some(t) = task.take() {
+        t.abort();
+    }
+    let Some((id, buf)) = logs.clone() else { return };
+    let notify = out.notify.clone();
+    *task = Some(tokio::spawn(session::follow_logs(docker.clone(), id, buf, move || notify())));
 }
 
 fn sample(id: &str, s: &Stats) -> StatsSample {

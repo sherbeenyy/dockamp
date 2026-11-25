@@ -1,3 +1,4 @@
+pub mod console;
 pub mod details;
 pub mod player;
 pub mod playlist;
@@ -12,16 +13,21 @@ pub const DETAILS_H: i32 = 100;
 pub const PLAYLIST_H: i32 = 140;
 pub const H: i32 = PLAYER_H + DETAILS_H + PLAYLIST_H;
 
+// Widgets never take egui focus: Tab then Enter must not press a button.
 pub fn hit(ui: &Ui, px: &Px, id: &str, x: i32, y: i32, w: i32, h: i32) -> Response {
-    ui.interact(px.rect_of(x, y, w, h), ui.id().with(id).with(px.origin.y as i32), Sense::click())
+    ui.interact(px.rect_of(x, y, w, h), ui.id().with(id).with(px.origin.y as i32), Sense::CLICK)
 }
 
 /// Title bar drag-to-move (everything but the right-side buttons area).
 pub fn title_drag(ui: &Ui, px: &Px, id: &str) {
+    title_drag_w(ui, px, id, W);
+}
+
+pub fn title_drag_w(ui: &Ui, px: &Px, id: &str, w: i32) {
     let r = ui.interact(
-        px.rect_of(0, 0, W - 40, 14),
+        px.rect_of(0, 0, w - 40, 14),
         ui.id().with(id),
-        Sense::click_and_drag(),
+        Sense::CLICK | Sense::DRAG,
     );
     if r.drag_started() {
         ui.ctx().send_viewport_cmd(ViewportCommand::StartDrag);

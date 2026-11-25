@@ -3,6 +3,7 @@
 
 pub mod font;
 pub mod lcd;
+pub mod mono;
 
 use std::cell::RefCell;
 
@@ -48,28 +49,29 @@ impl Canvas {
     }
 }
 
-/// Painter that works in integer skin pixels. `oy` offsets into the canvas (panel stacking);
+/// Painter that works in integer skin pixels. `ox`/`oy` offset into the canvas (panel layout);
 /// `origin`/`s` map skin pixels to screen points for hit-testing.
 pub struct Px<'a> {
     pub canvas: &'a RefCell<Canvas>,
+    pub ox: i32,
     pub oy: i32,
     pub origin: Pos2,
     pub s: f32,
 }
 
 impl<'a> Px<'a> {
-    pub fn at(&self, dy: i32) -> Px<'a> {
-        Px { canvas: self.canvas, oy: self.oy + dy, origin: self.origin, s: self.s }
+    pub fn at(&self, dx: i32, dy: i32) -> Px<'a> {
+        Px { canvas: self.canvas, ox: self.ox + dx, oy: self.oy + dy, origin: self.origin, s: self.s }
     }
 
     pub fn rect_of(&self, x: i32, y: i32, w: i32, h: i32) -> Rect {
-        let min = self.origin + Vec2::new(x as f32, (y + self.oy) as f32) * self.s;
+        let min = self.origin + Vec2::new((x + self.ox) as f32, (y + self.oy) as f32) * self.s;
         Rect::from_min_size(min, Vec2::new(w as f32, h as f32) * self.s)
     }
 
     pub fn fill(&self, x: i32, y: i32, w: i32, h: i32, c: Color32) {
         let mut cv = self.canvas.borrow_mut();
-        let y = y + self.oy;
+        let (x, y) = (x + self.ox, y + self.oy);
         let (x0, y0) = (x.max(0), y.max(0));
         let (x1, y1) = ((x + w).min(cv.w), (y + h).min(cv.h));
         let cw = cv.w;
@@ -141,6 +143,7 @@ pub mod icon {
     pub const NEXT: &[&str] = &["#...##", "##..##", "###.##", "######", "###.##", "##..##", "#...##"];
     pub const RESTART: &[&str] = &[".####.#", "#....##", "#...###", "#......", "#.....#", ".#...#.", "..###.."];
     pub const EJECT: &[&str] = &["...#...", "..###..", ".#####.", "#######", ".......", "#######", "#######"];
+    pub const CONSOLE: &[&str] = &["#......", ".#.....", "..#....", "...#...", "..#....", ".#.....", "#..####"];
     pub const STATE_PLAY: &[&str] = &["#....", "##...", "###..", "####.", "###..", "##...", "#...."];
     pub const STATE_PAUSE: &[&str] = &["##.##", "##.##", "##.##", "##.##", "##.##", "##.##", "##.##"];
     pub const STATE_STOP: &[&str] = &[".....", "#####", "#####", "#####", "#####", "#####", "....."];

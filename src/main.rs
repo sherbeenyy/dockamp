@@ -1,29 +1,46 @@
+mod console;
 mod docker;
 mod model;
+mod session;
 mod skin;
 mod ui;
 
 use std::cell::RefCell;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc::{channel, Receiver};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Key, Vec2, ViewportCommand};
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 
+use console::{lock, LogBuf, Shared, Term};
 use docker::{Action, Command, StatsSample, Update};
 use model::{Confirm, ContainerInfo, Row, State};
 use skin::{Canvas, Px};
+use ui::console::Tab;
 use ui::player::{Transport, SPECTRUM_BARS};
 
 const DEFAULT_SCALE: u8 = 2;
 
-fn window_size(scale: u8) -> Vec2 {
-    Vec2::new(ui::W as f32, ui::H as f32) * scale as f32
+fn window_size(scale: u8, console: bool) -> Vec2 {
+    Vec2::new(canvas_w(console) as f32, ui::H as f32) * scale as f32
+}
+
+fn canvas_w(console: bool) -> i32 {
+    ui::W + if console { ui::console::CONSOLE_W } else { 0 }
+}
+
+/// An open shell. Dropping it hangs the shell up.
+pub struct Session {
+    pub term: Shared<Term>,
+    input: UnboundedSender<Vec<u8>>,
 }
 
 pub struct App {
-    cmd: UnboundedSender<Command>,
+    /// None once the app is closing.
+    cmd: Option<UnboundedSender<Command>>,
+    worker_done: Receiver<()>,
     rx: Receiver<Update>,
     pub containers: Vec<ContainerInfo>,
     pub rows: Vec<Row>,
@@ -39,7 +56,20 @@ pub struct App {
     /// Container waiting for the second remove press.
     removing: Confirm,
     pub error: Option<String>,
+    /// Scale in use: the chosen one, or less if the window wouldn't fit the monitor.
     pub scale: u8,
+    chosen_scale: u8,
+    console_open: bool,
+    pub tab: Tab,
+    pub log: Shared<LogBuf>,
+    /// Absolute top log row while scrolled up; None follows new output.
+    pub log_top: Option<u64>,
+    logs_for: Option<String>,
+    pub terms: HashMap<String, Session>,
+    /// Container whose terminal has the keyboard. It is kept when the shell or container goes
+    /// away, so what is still being typed never reaches the player's shortcuts.
+    pub term_focus: Option<String>,
+    pub console_acc: f32,
     pub scroll: usize,
     pub scroll_acc: f32,
     pub follow_selection: bool,
@@ -52,9 +82,12 @@ impl App {
     fn new(cc: &eframe::CreationContext) -> Self {
         let (tx, rx) = channel();
         let ctx = cc.egui_ctx.clone();
-        let cmd = docker::spawn(tx, move || ctx.request_repaint());
+        // The skin has its own scaling, and Ctrl+- / Ctrl+0 belong to the shell.
+        ctx.options_mut(|o| o.zoom_with_keyboard = false);
+        let (cmd, worker_done) = docker::spawn(tx, move || ctx.request_repaint());
         Self {
-            cmd,
+            cmd: Some(cmd),
+            worker_done,
             rx,
             containers: Vec::new(),
             rows: Vec::new(),
@@ -67,6 +100,15 @@ impl App {
             removing: Confirm::default(),
             error: None,
             scale: DEFAULT_SCALE,
+            chosen_scale: DEFAULT_SCALE,
+            console_open: false,
+            tab: Tab::Logs,
+            log: Arc::default(),
+            log_top: None,
+            logs_for: None,
+            terms: HashMap::new(),
+            term_focus: None,
+            console_acc: 0.0,
             scroll: 0,
             scroll_acc: 0.0,
             follow_selection: false,
@@ -102,7 +144,7 @@ impl App {
             self.stats = None;
             self.cpu_hist.clear();
             self.marquee_t0 = Instant::now();
-            let _ = self.cmd.send(Command::Select(id));
+            self.send(Command::Select(id));
         }
     }
 
@@ -127,7 +169,7 @@ impl App {
         match t.action(state) {
             Some(a) => {
                 self.flash = Some((a.progress().into(), Instant::now(), true));
-                let _ = self.cmd.send(Command::Act(id, a));
+                self.send(Command::Act(id, a));
             }
             None => {
                 let msg = match state {
@@ -148,7 +190,7 @@ impl App {
             let name = c.name.clone();
             self.flash = Some((format!("BUILDING {}...", compose.service), Instant::now(), true));
             self.building = Some(name.clone());
-            let _ = self.cmd.send(Command::Rebuild(name, compose));
+            self.send(Command::Rebuild(name, compose));
             return;
         } else {
             "NOT A COMPOSE CONTAINER - CANNOT REBUILD".into()
@@ -165,7 +207,7 @@ impl App {
         } else if self.removing.press(&id, Instant::now()) {
             let a = Action::Remove;
             self.flash = Some((a.progress().into(), Instant::now(), true));
-            let _ = self.cmd.send(Command::Act(id, a));
+            self.send(Command::Act(id, a));
         }
         self.marquee_t0 = Instant::now();
     }
@@ -186,8 +228,147 @@ impl App {
     }
 
     pub fn cycle_scale(&mut self, ctx: &egui::Context) {
-        self.scale = self.scale % 3 + 1;
-        ctx.send_viewport_cmd(ViewportCommand::InnerSize(window_size(self.scale)));
+        let next = self.scale % 3 + 1;
+        self.chosen_scale = if next > self.max_scale(ctx) { 1 } else { next };
+        self.resize(ctx);
+    }
+
+    /// Largest scale at which the window fits the monitor.
+    fn max_scale(&self, ctx: &egui::Context) -> u8 {
+        let Some(m) = ctx.input(|i| i.viewport().monitor_size).filter(|m| m.x > 0.0) else { return 3 };
+        let fits = |s: &u8| window_size(*s, self.console_open).x <= m.x;
+        (1..=3).rev().find(fits).unwrap_or(1)
+    }
+
+    fn resize(&mut self, ctx: &egui::Context) {
+        self.scale = self.chosen_scale.min(self.max_scale(ctx));
+        let size = window_size(self.scale, self.console_open);
+        ctx.send_viewport_cmd(ViewportCommand::InnerSize(size));
+    }
+
+    fn send(&self, c: Command) {
+        if let Some(cmd) = &self.cmd {
+            let _ = cmd.send(c);
+        }
+    }
+
+    pub fn open_console(&mut self, ctx: &egui::Context, tab: Tab) {
+        if !self.console_open {
+            self.console_open = true;
+            self.resize(ctx);
+        }
+        self.tab = tab;
+        self.removing.cancel();
+        match tab {
+            Tab::Logs => self.term_focus = None,
+            Tab::Terminal => self.focus_terminal(),
+        }
+    }
+
+    pub fn close_console(&mut self, ctx: &egui::Context) {
+        self.console_open = false;
+        self.term_focus = None;
+        self.resize(ctx);
+    }
+
+    pub fn toggle_console(&mut self, ctx: &egui::Context) {
+        if self.console_open {
+            self.close_console(ctx);
+        } else {
+            self.open_console(ctx, Tab::Logs);
+        }
+    }
+
+    /// `L` / `T`: show that tab; `L` on the open LOGS tab closes the console.
+    fn console_key(&mut self, ctx: &egui::Context, tab: Tab) {
+        if tab == Tab::Logs && self.console_open && self.tab == tab {
+            self.close_console(ctx);
+        } else {
+            self.open_console(ctx, tab);
+        }
+    }
+
+    /// Gives the keyboard to the selected container's shell, opening one if needed.
+    pub fn focus_terminal(&mut self) {
+        self.term_focus = None;
+        let Some(id) = self.selected.clone() else { return };
+        let live = self.terms.get(&id).is_some_and(|s| lock(&s.term).ended.is_none());
+        if !live {
+            if !self.selected_info().is_some_and(|c| c.state.is_up()) {
+                return;
+            }
+            let (input, rx) = unbounded_channel();
+            let term = Arc::new(Mutex::new(Term::new()));
+            let reply = input.downgrade();
+            self.send(Command::Shell { id: id.clone(), term: term.clone(), input: rx, reply });
+            self.terms.insert(id.clone(), Session { term, input });
+        }
+        self.term_focus = Some(id);
+    }
+
+    /// Positive scrolls back.
+    pub fn scroll_console(&mut self, delta: i32) {
+        if self.tab == Tab::Logs {
+            let buf = lock(&self.log);
+            let top = self.log_top.unwrap_or(buf.bottom()) as i64 - delta as i64;
+            let top = top.max(buf.first() as i64) as u64;
+            self.log_top = (top < buf.bottom()).then_some(top);
+        } else if let Some(s) = self.selected.as_ref().and_then(|id| self.terms.get(id)) {
+            lock(&s.term).scroll(delta);
+        }
+    }
+
+    /// Keeps the worker following the logs of whatever the LOGS tab shows.
+    fn sync_logs(&mut self) {
+        let want = self.selected.clone().filter(|_| self.console_open && self.tab == Tab::Logs);
+        if want != self.logs_for {
+            self.logs_for = want.clone();
+            self.log_top = None;
+            lock(&self.log).clear();
+            // A fresh buffer, so a late write for the old container can't land in this one.
+            self.log = Arc::default();
+            self.send(Command::Logs(want, self.log.clone()));
+        }
+    }
+
+    fn terminal_keys(&mut self, ctx: &egui::Context, focus: &str) {
+        let (events, mods) = ctx.input(|i| (i.events.clone(), i.modifiers));
+        let pressed = |want: egui::Modifiers, k: Key| {
+            events.iter().any(|e| matches!(e, egui::Event::Key { key, pressed: true, modifiers, .. }
+                if *key == k && modifiers.matches_exact(want)))
+        };
+        if pressed(egui::Modifiers::SHIFT, Key::Escape) {
+            self.term_focus = None;
+            return;
+        }
+        // Never type into a container the user didn't choose to type into.
+        if self.selected.as_deref() != Some(focus) {
+            return;
+        }
+        for (k, d) in [(Key::PageUp, console::ROWS as i32 / 2), (Key::PageDown, -(console::ROWS as i32 / 2))] {
+            if pressed(egui::Modifiers::SHIFT, k) {
+                self.scroll_console(d);
+                return;
+            }
+        }
+        let Some(s) = self.terms.get(focus) else { return };
+        let mut t = lock(&s.term);
+        if t.ended.is_some() {
+            drop(t);
+            if pressed(egui::Modifiers::NONE, Key::Enter) {
+                self.focus_terminal();
+                // Not running any more: still keep the keyboard.
+                self.term_focus.get_or_insert_with(|| focus.to_string());
+            }
+            return;
+        }
+        let (app_cursor, bracketed) = (t.screen().application_cursor(), t.screen().bracketed_paste());
+        let bytes: Vec<u8> =
+            events.iter().filter_map(|e| ui::console::encode(e, mods, app_cursor, bracketed)).flatten().collect();
+        if !bytes.is_empty() {
+            t.scroll_to_bottom();
+            let _ = s.input.send(bytes);
+        }
     }
 
     pub fn marquee_text(&self) -> String {
@@ -216,6 +397,8 @@ impl App {
                     let old_index = self.selected_index();
                     self.rows = model::arrange(&mut v);
                     self.containers = v;
+                    let containers = &self.containers;
+                    self.terms.retain(|id, _| containers.iter().any(|c| c.id == *id));
                     if self.selected_index().is_none() {
                         // Recreated (new ID, same name)? Keep it selected; else take its neighbour.
                         let same_name = self.selected_name.as_deref().and_then(|n| {
@@ -256,6 +439,9 @@ impl App {
     }
 
     fn keys(&mut self, ctx: &egui::Context) {
+        if let Some(focus) = self.term_focus.clone() {
+            return self.terminal_keys(ctx, &focus);
+        }
         let pressed = |k| ctx.input(|i| i.key_pressed(k));
         if pressed(Key::Z) || pressed(Key::ArrowUp) {
             self.step(ctx, -1);
@@ -293,6 +479,25 @@ impl App {
         if ctx.input(|i| i.key_pressed(Key::Escape)) {
             self.removing.cancel();
         }
+        let plain = ctx.input(|i| i.modifiers.is_none());
+        if pressed(Key::L) && plain {
+            self.console_key(ctx, Tab::Logs);
+        }
+        if pressed(Key::T) && plain {
+            self.console_key(ctx, Tab::Terminal);
+        }
+        if self.console_open {
+            let page = console::ROWS as i32 - 2;
+            if pressed(Key::PageUp) {
+                self.scroll_console(page);
+            }
+            if pressed(Key::PageDown) {
+                self.scroll_console(-page);
+            }
+            if pressed(Key::End) {
+                self.scroll_console(-1_000_000);
+            }
+        }
         if pressed(Key::D) {
             self.cycle_scale(ctx);
         }
@@ -316,17 +521,26 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain();
         self.keys(ctx);
+        // Laid out once per frame: a toggle while drawing takes effect on the next one.
+        let console = self.console_open;
+        let w = canvas_w(console);
+        if self.canvas.get_mut().w != w {
+            self.canvas = RefCell::new(Canvas::new(w, ui::H));
+        }
         let canvas = std::mem::replace(&mut self.canvas, RefCell::new(Canvas::new(0, 0)));
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ctx, |ui| {
             let origin = ui.max_rect().min;
-            let px = Px { canvas: &canvas, oy: 0, origin, s: self.scale as f32 };
+            let px = Px { canvas: &canvas, ox: 0, oy: 0, origin, s: self.scale as f32 };
             ui::player::draw(self, ui, &px);
-            ui::details::draw(self, ui, &px.at(ui::PLAYER_H));
-            ui::playlist::draw(self, ui, &px.at(ui::PLAYER_H + ui::DETAILS_H));
+            ui::details::draw(self, ui, &px.at(0, ui::PLAYER_H));
+            ui::playlist::draw(self, ui, &px.at(0, ui::PLAYER_H + ui::DETAILS_H));
+            if console {
+                ui::console::draw(self, ui, &px.at(ui::W, 0));
+            }
 
             // One texture upload per frame, scaled with nearest-neighbour for crisp pixels.
             let image = egui::ColorImage {
-                size: [ui::W as usize, ui::H as usize],
+                size: [w as usize, ui::H as usize],
                 pixels: canvas.borrow().pixels.clone(),
             };
             let tex = match &mut self.tex {
@@ -336,12 +550,23 @@ impl eframe::App for App {
                 }
                 None => self.tex.insert(ctx.load_texture("skin", image, egui::TextureOptions::NEAREST)),
             };
-            let rect = egui::Rect::from_min_size(origin, window_size(self.scale));
+            let rect = egui::Rect::from_min_size(origin, window_size(self.scale, console));
             let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
             ui.painter().image(tex.id(), rect, uv, egui::Color32::WHITE);
         });
         self.canvas = canvas;
+        self.sync_logs();
+        if console != self.console_open {
+            ctx.request_repaint();
+        }
         ctx.request_repaint_after(self.next_tick());
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // Hang up open shells and let the worker finish doing so.
+        self.terms.clear();
+        self.cmd = None;
+        let _ = self.worker_done.recv_timeout(Duration::from_millis(2500));
     }
 }
 
@@ -350,7 +575,7 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default()
             .with_title("DockAmp")
             .with_app_id("dockamp")
-            .with_inner_size(window_size(DEFAULT_SCALE))
+            .with_inner_size(window_size(DEFAULT_SCALE, false))
             .with_decorations(false)
             .with_resizable(false),
         renderer: eframe::Renderer::Glow,

@@ -148,6 +148,9 @@ pub fn draw(app: &mut App, ui: &Ui, px: &Px) {
     if button(ui, px, "remove", 162, y, 23, 18, icon::EJECT) {
         app.remove();
     }
+    if button(ui, px, "console", 189, y, 23, 18, icon::CONSOLE) {
+        app.toggle_console(ui.ctx());
+    }
 
     let up_n = app.containers.iter().filter(|c| c.state.is_up()).count();
     let summary = format!("{}/{} UP", up_n, app.containers.len());

@@ -31,6 +31,8 @@ event-driven, and idles at roughly 1% CPU and ~30 MB of its own memory.
 - **Inspector:** ID, image, command, ports, health, restart count, exit code and created time.
 - **Transport controls:** start, pause/unpause, stop and restart from the player buttons or the
   keyboard.
+- **Console:** a side panel with the selected container's live logs and a real terminal inside
+  it, each in its own tab (see [Console](#console-l--t)).
 - **Copy the ID:** click the ID in the inspector, or press `Ctrl+C`, to copy it to the clipboard.
 - **Remove containers:** eject a container for good with the ⏏ button or `Delete`, with a second
   press to confirm (see [Removing](#removing-delete)).
@@ -57,6 +59,8 @@ event-driven, and idles at roughly 1% CPU and ~30 MB of its own memory.
 | ⟳              | `R`        | Restart                                           |
 | ⏏              | `Delete`   | Remove the container (press twice)                |
 | ID field       | `Ctrl+C`   | Copy the container ID                             |
+| `>_`           | `L`        | Logs tab (again to close the console)             |
+|                | `T`        | Terminal tab                                      |
 |                | `Shift+R`  | Rebuild / recreate the Compose service            |
 | `1` `2` `3`    | `D`        | Cycle window scale 1× / 2× / 3×                   |
 | `_` / `X`      |            | Minimize / close                                  |
@@ -67,6 +71,22 @@ Drag any title bar to move the window.
 Actions apply immediately with no confirmation dialogs, except removing a container, which takes
 a second press. Their progress shows in the marquee (`STOPPING...` → `STOPPED`). DockAmp never
 deletes images or volumes.
+
+## Console (`L` / `T`)
+
+The `>_` button opens a panel next to the player with two tabs for the selected container:
+
+<img src="docs/console.png" alt="The console panel following a container's logs" width="500">
+
+- **Logs** shows the last 1000 lines and follows new ones, with stderr in yellow. Stopped
+  containers work too. Scroll with the mouse wheel or `PgUp` / `PgDn`; `End` follows again.
+- **Terminal** opens `bash` (or `sh`) in a running container, as `docker exec -it` would: an
+  80×35 color terminal with scrollback (`Shift+PgUp` / `Shift+PgDn` or the wheel).
+
+While the terminal has the keyboard, every key goes to the shell and none of the player's
+shortcuts work. Press `Shift+Esc` or click elsewhere to get them back. Each container keeps its own
+shell while you look at others; closing DockAmp closes them all. If the window wouldn't fit your
+monitor, the scale is lowered while the console is open.
 
 ## Removing (`Delete`)
 
@@ -149,7 +169,7 @@ DOCKER_HOST=tcp://build-box:2375 dockamp
 ```
 ┌──────────── UI thread (eframe / egui, glow) ────────────┐      ┌──── docker thread (tokio) ────┐
 │ player · inspector · playlist                           │      │ bollard client                │
-│   draw into a 275×356 CPU framebuffer                   │ ◀──  │  list + inspect once          │
+│   draw into one CPU framebuffer                         │ ◀──  │  list + inspect once          │
 │   → one texture, nearest-neighbour scaled               │ Upd. │  event stream → re-inspect    │
 │ repaint ~1/s idle, ~5/s while the marquee scrolls       │ ──▶  │  stats stream (selected only) │
 │                                                         │ Cmd  │  start/stop/…  compose rebuild│
@@ -160,8 +180,10 @@ DOCKER_HOST=tcp://build-box:2375 dockamp
 |---------------------|---------------------------------------------------------------------|
 | `src/model.rs`      | Container data, playlist sorting and grouping, time formatting (unit-tested) |
 | `src/docker.rs`     | Background worker: events, inspect, stats, actions, compose rebuild |
-| `src/skin/`         | Palette, framebuffer painter, bitmap font, 7-segment LCD            |
-| `src/ui/`           | The player, inspector and playlist panels, plus hit-testing         |
+| `src/session.rs`    | Worker side of log following and shells                             |
+| `src/console.rs`    | Log buffer and terminal emulator state (unit-tested)                |
+| `src/skin/`         | Palette, framebuffer painter, bitmap fonts, 7-segment LCD           |
+| `src/ui/`           | The player, inspector, playlist and console panels, plus hit-testing |
 | `src/main.rs`       | Window setup, app state and keyboard shortcuts                      |
 
 ## Development
