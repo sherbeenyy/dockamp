@@ -31,6 +31,7 @@ event-driven, and idles at roughly 1% CPU and ~30 MB of its own memory.
 - **Inspector:** ID, image, command, ports, health, restart count, exit code and created time.
 - **Transport controls:** start, pause/unpause, stop and restart from the player buttons or the
   keyboard.
+- **Copy the ID:** click the ID in the inspector, or press `Ctrl+C`, to copy it to the clipboard.
 - **Remove containers:** eject a container for good with the ⏏ button or `Delete`, with a second
   press to confirm (see [Removing](#removing-delete)).
 - **One-key rebuild:** `Shift+R` rebuilds or recreates a Compose service (see
@@ -55,6 +56,7 @@ event-driven, and idles at roughly 1% CPU and ~30 MB of its own memory.
 | ⏭              | `B` / `↓`  | Next container                                    |
 | ⟳              | `R`        | Restart                                           |
 | ⏏              | `Delete`   | Remove the container (press twice)                |
+| ID field       | `Ctrl+C`   | Copy the container ID                             |
 |                | `Shift+R`  | Rebuild / recreate the Compose service            |
 | `1` `2` `3`    | `D`        | Cycle window scale 1× / 2× / 3×                   |
 | `_` / `X`      |            | Minimize / close                                  |

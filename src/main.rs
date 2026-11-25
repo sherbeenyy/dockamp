@@ -170,6 +170,16 @@ impl App {
         self.marquee_t0 = Instant::now();
     }
 
+    /// Ctrl+C / click on the ID: puts the selected container's short ID on the clipboard.
+    pub fn copy_id(&mut self, ctx: &egui::Context) {
+        let Some(c) = self.selected_info() else { return };
+        let id = c.short_id().to_string();
+        self.removing.cancel();
+        self.flash = Some((format!("COPIED {id}").to_uppercase(), Instant::now(), false));
+        self.marquee_t0 = Instant::now();
+        ctx.copy_text(id);
+    }
+
     /// True while the selected container is waiting for the second remove press.
     pub fn remove_pending(&self) -> bool {
         self.selected.as_deref().is_some_and(|id| self.removing.pending(id, Instant::now()))
@@ -268,6 +278,10 @@ impl App {
             } else {
                 self.transport(Transport::Restart);
             }
+        }
+        // Ctrl+C arrives as a Copy event, so it never triggers the plain `C` (pause) key.
+        if ctx.input(|i| i.events.contains(&egui::Event::Copy)) {
+            self.copy_id(ctx);
         }
         // Auto-repeat must not count as the confirming press.
         let del = |e: &egui::Event| {
